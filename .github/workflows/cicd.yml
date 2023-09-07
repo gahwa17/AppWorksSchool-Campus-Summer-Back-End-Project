@@ -1,7 +1,6 @@
 name: CI/CD test for Canchu
 
 on:
-  # 當 pull 或 push week_5_part_2 分支，觸發這個 workflow，
   push:
     branches: [main]
   pull_request:
