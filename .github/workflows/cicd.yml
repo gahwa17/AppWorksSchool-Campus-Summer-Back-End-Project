@@ -1,0 +1,118 @@
+name: CI/CD test for Canchu
+
+on:
+  # 當 pull 或 push week_5_part_2 分支，觸發這個 workflow，
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+env:
+  TEST_TAG: canchu-server:latest
+
+jobs:
+  bulid_unit_test_push_image:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.vars.output.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      # 建立Canchu專案所需的環境變數，並建立所有容器，然後跑單元測試
+      - name: Build enviroment for MySQL,Nginx
+        run: |
+          pwd
+
+          echo "${{secrets.ENV_FILE}}" > .env
+          echo "${{secrets.CERTIFICATE_CRT}}" > nginx/certificate.crt
+          echo "${{secrets.PRIVATE_KEY}}" > nginx/private.key
+
+          docker compose up -d
+
+      - name: Wait for containers to start
+        run: sleep 10
+
+      - name: Run unit test in canchu_server container
+        run: docker exec canchu_server npm test -- --detectOpenHandles --watch=false --forceExit
+
+      # Docker用於跨平台構建的工具，模擬不同的 CPU 架構，在不同的環境之間提供虛擬化
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      # 登錄到Docker Hub，要提供Docker Hub用戶名和存取token（存儲在GitHub的secrets中）
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+
+      # 把 Canchu-server 推到遠端 dockerhub(gahwa17/canchu-demo)，並打上 canchu-server:latest 的 tag
+      - name: Build and Push canchu_server image
+        uses: docker/build-push-action@v4
+        with:
+          context: ./students/chia-hua/Canchu/app
+          file: ./students/chia-hua/Canchu/app/Dockerfile
+          push: true
+          tags: gahwa17/${{ env.TEST_TAG }}
+
+  deploy:
+    needs: bulid_unit_test_push_image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Show working directory
+        run: |
+          pwd
+          ls -la
+          ls -la students/chia-hua/Canchu/
+
+      - name: Install SSH client
+        run: sudo apt-get update && sudo apt-get install -y openssh-client
+
+      - name: Create SSH directory
+        run: mkdir -p $HOME/.ssh
+
+      - name: Add remote host key to known_hosts
+        run: ssh-keyscan -H ${{ secrets.EC2_HOST }} >> $HOME/.ssh/known_hosts
+
+      - name: Copy file via a SSH key
+        uses: garygrossgarten/github-action-scp@release
+        with:
+          local: students/chia-hua/Canchu/docker-compose.yml
+          remote: /home/gahwa17/Campus-Summer-Back-End/students/chia-hua/Canchu
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          privateKey: ${{ secrets.EC2_PRIVATE_KEY }}
+
+      - name: deploy to ec2
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_KEY }}
+          port: 22
+          script: |
+            cd Campus-Summer-Back-End/students/chia-hua/Canchu
+            pwd
+            git checkout main
+            git pull
+            cd ./app
+            pwd
+            echo "${{secrets.CERTIFICATE_CRT}}" > nginx/certificate.crt
+            echo "${{secrets.PRIVATE_KEY}}" > nginx/private.key
+            cd ..
+            sudo docker compose down
+            sudo docker compose pull
+            sudo docker compose up -d --build
+            sudo docker image prune -af
+            sudo docker volume prune
